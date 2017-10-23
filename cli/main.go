@@ -39,6 +39,10 @@ func realMain() int {
 	scanner := bufio.NewScanner(os.Stdin)
 	for scanner.Scan() {
 		line := scanner.Text()
+		if len(line) == 0 {
+			continue
+		}
+
 		tc, err := parseCmdLine(line)
 		if err != nil {
 			log.Error(err)
