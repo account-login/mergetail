@@ -37,7 +37,7 @@ func colorize(str string, num int) string {
 }
 
 func makeLine(ctx *cmdContext, line string) string {
-	return colorize(ctx.prefix, ctx.index) + ":\t" + line
+	return ctx.prefix + " " + line
 }
 
 func handleCmdContext(ctx *cmdContext, outch chan<- string, errch chan<- error, wg *sync.WaitGroup) {
@@ -72,6 +72,26 @@ func mergeCmds(ctxlist []*cmdContext) (outch chan string, errch chan error) {
 	return
 }
 
+func rpad(input string, width int) string {
+	for i := len(input); i < width; i++ {
+		input += " "
+	}
+	return input
+}
+
+func formatPrefix(ctxlist []*cmdContext) {
+	maxwidth := 0
+	for _, ctx := range ctxlist {
+		if len(ctx.prefix) > maxwidth {
+			maxwidth = len(ctx.prefix)
+		}
+	}
+
+	for i, ctx := range ctxlist {
+		ctx.prefix = colorize(rpad(ctx.prefix, maxwidth), i)
+	}
+}
+
 func MergeTail(cmds []TailCmd, writer io.Writer) (err error) {
 	ctxlist := make([]*cmdContext, 0, len(cmds))
 
@@ -97,6 +117,8 @@ func MergeTail(cmds []TailCmd, writer io.Writer) (err error) {
 			log.Debugf("started cmd: %q", tc.Cmd.Path)
 		}
 	}
+
+	formatPrefix(ctxlist)
 
 	errCount := 0
 	outch, errch := mergeCmds(ctxlist)
