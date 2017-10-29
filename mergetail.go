@@ -117,34 +117,60 @@ func formatPrefix(ctxlist []*cmdContext) {
 
 func MergeTail(cmds []TailCmd, writer io.Writer) (err error) {
 	ctxlist := make([]*cmdContext, 0, len(cmds))
+	var wg sync.WaitGroup
 
 	defer func() {
 		for _, ctx := range ctxlist {
 			ctx.stdout.Close()
 			ctx.stderr.Close()
 		}
+
+		// kill running cmds
+		for _, tc := range cmds {
+			if tc.Cmd.Process != nil {
+				tc.Cmd.Process.Kill()
+			}
+		}
+
+		// wait for all cmds
+		wg.Wait()
 	}()
 
 	for i, tc := range cmds {
+		// prepare pipes
 		stdout, pipeErr := tc.Cmd.StdoutPipe()
 		if pipeErr != nil {
-			err = errors.Wrapf(pipeErr, "failed to get stdout for Cmd: %q", tc.Cmd.Path)
+			err = errors.Wrapf(pipeErr, "failed to get stdout for Cmd: %v", tc.Cmd.Args)
 			return
 		}
 		stderr, pipeErr := tc.Cmd.StderrPipe()
 		if pipeErr != nil {
-			err = errors.Wrapf(pipeErr, "failed to get stderr for Cmd: %q", tc.Cmd.Path)
+			err = errors.Wrapf(pipeErr, "failed to get stderr for Cmd: %v", tc.Cmd.Args)
 			return
 		}
 
 		ctxlist = append(ctxlist, &cmdContext{stdout, stderr, tc.Prefix, i})
 
+		// start cmd
 		cmdErr := tc.Cmd.Start()
 		if cmdErr != nil {
-			err = errors.Wrapf(cmdErr, "failed to start Cmd: %q", tc.Cmd.Path)
+			err = errors.Wrapf(cmdErr, "failed to start Cmd: %v", tc.Cmd.Args)
 			return
 		} else {
-			log.Debugf("started cmd: %q", tc.Cmd.Path)
+			log.Debugf("started cmd: %v pid: %v", tc.Cmd.Args, tc.Cmd.Process.Pid)
+
+			wg.Add(1)
+			// wait cmd and logging
+			go func(cmd *exec.Cmd) {
+				err := cmd.Wait()
+				_, isExitErr := err.(*exec.ExitError)
+				if err != nil && !isExitErr {
+					log.Errorf("failed to wait on Cmd: %v err: %v", cmd.Args, err)
+				} else {
+					log.Debugf("Cmd exits: %v %v", cmd.Args, cmd.ProcessState)
+				}
+				wg.Done()
+			}(tc.Cmd)
 		}
 	}
 
