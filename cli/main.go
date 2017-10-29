@@ -2,7 +2,7 @@ package main
 
 import (
 	"bufio"
-	"mergetail"
+	"github.com/account-login/mergetail"
 	"os"
 	"os/exec"
 
