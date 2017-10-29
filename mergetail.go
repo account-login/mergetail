@@ -13,6 +13,7 @@ import (
 )
 
 // TODO: terminate child processes
+// TODO: cmd template
 
 type TailCmd struct {
 	Cmd    *exec.Cmd
@@ -20,6 +21,7 @@ type TailCmd struct {
 }
 
 type cmdContext struct {
+	cmd    *exec.Cmd
 	stdout io.ReadCloser
 	stderr io.ReadCloser
 	prefix string
@@ -50,7 +52,7 @@ func makeStderrLine(ctx *cmdContext, line string) string {
 type lineMakerFunc func(string) string
 
 func handleOutput(reader io.ReadCloser, lineMaker lineMakerFunc,
-	stdxxxch chan<- string, errch chan<- error, wg *sync.WaitGroup) {
+	stdxxxch chan<- string, errch chan<- error, ioDone chan<- struct{}) {
 
 	scanner := bufio.NewScanner(reader)
 	for scanner.Scan() {
@@ -61,11 +63,7 @@ func handleOutput(reader io.ReadCloser, lineMaker lineMakerFunc,
 	if err != nil {
 		errch <- err
 	}
-	err = reader.Close()
-	if err != nil {
-		errch <- err
-	}
-	wg.Done()
+	ioDone <- struct{}{}
 }
 
 func mergeCmds(ctxlist []*cmdContext) (stdoutch chan string, stderrch chan string, errch chan error) {
@@ -74,15 +72,32 @@ func mergeCmds(ctxlist []*cmdContext) (stdoutch chan string, stderrch chan strin
 	errch = make(chan error)
 
 	var wg sync.WaitGroup
-	wg.Add(len(ctxlist) * 2)
+	wg.Add(len(ctxlist))
+
 	for _, ctx := range ctxlist {
 		ctx := ctx
+		ioDone := make(chan struct{})
 		go handleOutput(
 			ctx.stdout, func(line string) string { return makeStdoutLine(ctx, line) },
-			stdoutch, errch, &wg)
+			stdoutch, errch, ioDone)
 		go handleOutput(
 			ctx.stderr, func(line string) string { return makeStderrLine(ctx, line) },
-			stderrch, errch, &wg)
+			stderrch, errch, ioDone)
+
+		go func() {
+			<-ioDone
+			<-ioDone
+
+			err := ctx.cmd.Wait()
+			_, isExitErr := err.(*exec.ExitError)
+			if err != nil && !isExitErr {
+				errch <- errors.Wrapf(err, "failed to wait on Cmd: %v", ctx.cmd.Args)
+			} else {
+				log.Debugf("Cmd exits: %v %v", ctx.cmd.Args, ctx.cmd.ProcessState)
+			}
+
+			wg.Done()
+		}()
 	}
 
 	go func() {
@@ -117,23 +132,14 @@ func formatPrefix(ctxlist []*cmdContext) {
 
 func MergeTail(cmds []TailCmd, writer io.Writer) (err error) {
 	ctxlist := make([]*cmdContext, 0, len(cmds))
-	var wg sync.WaitGroup
 
 	defer func() {
-		for _, ctx := range ctxlist {
-			ctx.stdout.Close()
-			ctx.stderr.Close()
-		}
-
 		// kill running cmds
 		for _, tc := range cmds {
 			if tc.Cmd.Process != nil {
 				tc.Cmd.Process.Kill()
 			}
 		}
-
-		// wait for all cmds
-		wg.Wait()
 	}()
 
 	for i, tc := range cmds {
@@ -149,7 +155,10 @@ func MergeTail(cmds []TailCmd, writer io.Writer) (err error) {
 			return
 		}
 
-		ctxlist = append(ctxlist, &cmdContext{stdout, stderr, tc.Prefix, i})
+		ctxlist = append(ctxlist, &cmdContext{
+			cmd: tc.Cmd, stdout: stdout, stderr: stderr,
+			prefix: tc.Prefix, index: i,
+		})
 
 		// start cmd
 		cmdErr := tc.Cmd.Start()
@@ -158,24 +167,12 @@ func MergeTail(cmds []TailCmd, writer io.Writer) (err error) {
 			return
 		} else {
 			log.Debugf("started cmd: %v pid: %v", tc.Cmd.Args, tc.Cmd.Process.Pid)
-
-			wg.Add(1)
-			// wait cmd and logging
-			go func(cmd *exec.Cmd) {
-				err := cmd.Wait()
-				_, isExitErr := err.(*exec.ExitError)
-				if err != nil && !isExitErr {
-					log.Errorf("failed to wait on Cmd: %v err: %v", cmd.Args, err)
-				} else {
-					log.Debugf("Cmd exits: %v %v", cmd.Args, cmd.ProcessState)
-				}
-				wg.Done()
-			}(tc.Cmd)
 		}
 	}
 
 	formatPrefix(ctxlist)
 
+	// output
 	errCount := 0
 	stdoutch, stderrch, errch := mergeCmds(ctxlist)
 	for {
