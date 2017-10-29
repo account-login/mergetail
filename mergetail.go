@@ -12,13 +12,16 @@ import (
 	"github.com/pkg/errors"
 )
 
+// TODO: terminate child processes
+
 type TailCmd struct {
 	Cmd    *exec.Cmd
 	Prefix string
 }
 
 type cmdContext struct {
-	reader io.ReadCloser
+	stdout io.ReadCloser
+	stderr io.ReadCloser
 	prefix string
 	index  int
 }
@@ -36,36 +39,56 @@ func colorize(str string, num int) string {
 	return fmt.Sprintf("\x1b[48;5;%dm%s%s\x1b[0m", code, fg, str)
 }
 
-func makeLine(ctx *cmdContext, line string) string {
+func makeStdoutLine(ctx *cmdContext, line string) string {
 	return ctx.prefix + " " + line
 }
 
-func handleCmdContext(ctx *cmdContext, outch chan<- string, errch chan<- error, wg *sync.WaitGroup) {
-	scanner := bufio.NewScanner(ctx.reader)
+func makeStderrLine(ctx *cmdContext, line string) string {
+	return ctx.prefix + " \x1b[1m" + line + "\x1b[0m"
+}
+
+type lineMakerFunc func(string) string
+
+func handleOutput(reader io.ReadCloser, lineMaker lineMakerFunc,
+	stdxxxch chan<- string, errch chan<- error, wg *sync.WaitGroup) {
+
+	scanner := bufio.NewScanner(reader)
 	for scanner.Scan() {
-		outch <- makeLine(ctx, scanner.Text())
+		stdxxxch <- lineMaker(scanner.Text())
 	}
 
 	err := scanner.Err()
 	if err != nil {
 		errch <- err
 	}
+	err = reader.Close()
+	if err != nil {
+		errch <- err
+	}
 	wg.Done()
 }
 
-func mergeCmds(ctxlist []*cmdContext) (outch chan string, errch chan error) {
-	outch = make(chan string)
+func mergeCmds(ctxlist []*cmdContext) (stdoutch chan string, stderrch chan string, errch chan error) {
+	stdoutch = make(chan string)
+	stderrch = make(chan string)
 	errch = make(chan error)
 
 	var wg sync.WaitGroup
-	wg.Add(len(ctxlist))
+	wg.Add(len(ctxlist) * 2)
 	for _, ctx := range ctxlist {
-		go handleCmdContext(ctx, outch, errch, &wg)
+		ctx := ctx
+		go handleOutput(
+			ctx.stdout, func(line string) string { return makeStdoutLine(ctx, line) },
+			stdoutch, errch, &wg)
+		go handleOutput(
+			ctx.stderr, func(line string) string { return makeStderrLine(ctx, line) },
+			stderrch, errch, &wg)
 	}
 
 	go func() {
 		wg.Wait()
-		close(outch)
+		close(stdoutch)
+		close(stderrch)
 		close(errch)
 	}()
 
@@ -97,7 +120,8 @@ func MergeTail(cmds []TailCmd, writer io.Writer) (err error) {
 
 	defer func() {
 		for _, ctx := range ctxlist {
-			ctx.reader.Close()
+			ctx.stdout.Close()
+			ctx.stderr.Close()
 		}
 	}()
 
@@ -107,7 +131,13 @@ func MergeTail(cmds []TailCmd, writer io.Writer) (err error) {
 			err = errors.Wrapf(pipeErr, "failed to get stdout for Cmd: %q", tc.Cmd.Path)
 			return
 		}
-		ctxlist = append(ctxlist, &cmdContext{stdout, tc.Prefix, i})
+		stderr, pipeErr := tc.Cmd.StderrPipe()
+		if pipeErr != nil {
+			err = errors.Wrapf(pipeErr, "failed to get stderr for Cmd: %q", tc.Cmd.Path)
+			return
+		}
+
+		ctxlist = append(ctxlist, &cmdContext{stdout, stderr, tc.Prefix, i})
 
 		cmdErr := tc.Cmd.Start()
 		if cmdErr != nil {
@@ -121,16 +151,20 @@ func MergeTail(cmds []TailCmd, writer io.Writer) (err error) {
 	formatPrefix(ctxlist)
 
 	errCount := 0
-	outch, errch := mergeCmds(ctxlist)
+	stdoutch, stderrch, errch := mergeCmds(ctxlist)
 	for {
 		select {
-		case line, ok := <-outch:
+		case line, ok := <-stdoutch:
 			if ok {
-				buf := []byte(line)
-				buf = append(buf, '\n')
-				writer.Write(buf)
+				writer.Write(append([]byte(line), '\n'))
 			} else {
-				outch = nil
+				stdoutch = nil
+			}
+		case line, ok := <-stderrch:
+			if ok {
+				writer.Write(append([]byte(line), '\n'))
+			} else {
+				stderrch = nil
 			}
 		case cmdErr, ok := <-errch:
 			if ok {
@@ -142,7 +176,7 @@ func MergeTail(cmds []TailCmd, writer io.Writer) (err error) {
 			}
 		}
 
-		if outch == nil && errch == nil {
+		if stdoutch == nil && stderrch == nil && errch == nil {
 			break
 		}
 	}
