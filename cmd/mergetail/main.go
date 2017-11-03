@@ -45,14 +45,18 @@ func getProgArgs() (args progArgs, err error) {
 
 	i := 0
 	for i = 0; i < len(os.Args); i++ {
-		if os.Args[i] == "-I" {
+		if strings.HasPrefix(os.Args[i], "-I") {
 			// placeholder in template
-			i++
-			if i < len(os.Args) {
-				args.placeHolder = os.Args[i]
+			if os.Args[i] == "-I" {
+				i++
+				if i < len(os.Args) {
+					args.placeHolder = os.Args[i]
+				} else {
+					err = errors.New("expect placeholder after -I")
+					return
+				}
 			} else {
-				err = errors.New("expect placeholder after -I")
-				return
+				args.placeHolder = os.Args[i][2:]
 			}
 		} else if os.Args[i] == "-t" {
 			// template
