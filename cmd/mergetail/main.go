@@ -2,6 +2,7 @@ package main
 
 import (
 	"bufio"
+	"net/http"
 	"os"
 	"os/exec"
 
@@ -89,8 +90,21 @@ func fillTemplate(template []string, placeHolder string, target string) []string
 	return ret
 }
 
+func StartDebugServer(addr string) {
+	go func() {
+		err := http.ListenAndServe(addr, nil)
+		if err != nil {
+			log.Errorf("failed to start debug server on %v: %v", addr, err)
+		} else {
+			log.Debugf("debug server started on %v", addr)
+		}
+	}()
+}
+
 func realMain() int {
 	defer log.Flush()
+
+	StartDebugServer(":8899")
 
 	args, err := getProgArgs()
 	if err != nil {
