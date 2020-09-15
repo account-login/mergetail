@@ -29,13 +29,16 @@ type cmdContext struct {
 }
 
 func colorize(str string, num int) string {
-	code := (num % 230) + 1
+	code := (num % 229) + 1
+	if code >= 4 {
+		code++
+	}
 	if code >= 16 {
 		code++
 	}
 	fg := "\x1b[30m"
 	m := (code - 4) / 6
-	if m == 2 || m == 8 || m == 14 || code == 4 || code == 8 {
+	if m == 2 || m == 3 || m == 8 || m == 9 || m == 14 || m == 15 || m == 20 || code == 8 {
 		fg = ""
 	}
 	return fmt.Sprintf("\x1b[48;5;%dm%s%s\x1b[0m", code, fg, str)
